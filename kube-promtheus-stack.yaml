@@ -1,0 +1,200 @@
+---
+apiVersion: source.toolkit.fluxcd.io/v1beta1
+kind: HelmRepository
+metadata:
+  name: prometheus-community
+  namespace: flux-system
+spec:
+  interval: 10m
+  url: https://prometheus-community.github.io/helm-charts
+---
+apiVersion: helm.toolkit.fluxcd.io/v2beta1
+kind: HelmRelease
+metadata:
+  name: kube-prometheus-release
+  namespace: dev-monitoring
+  annotations:
+    fluxcd.io/automated: "false"
+spec:
+  interval: 5m
+  releaseName: kube-prometheus-stack
+  chart:
+    spec:
+      chart: kube-prometheus-stack
+      version: 21.0.5
+      sourceRef:
+        kind: HelmRepository
+        name: prometheus-community
+        namespace: flux-system
+      interval: 10m
+  upgrade:
+    # Remediaton configuration for when an Helm upgrade action fails
+    remediation:
+      # Amount of retries to attempt after a failure,
+      # setting this to 0 means no remedation will be attempted
+      retries: 5
+  maxHistory: 20
+  values:
+    alertmanager:
+      config:
+        global:
+          resolve_timeout: 5m
+#          slack_api_url: 'https://hooks.slack.com/services/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'
+        route:
+          group_by: ["alertname"]
+          group_wait: 30s
+          group_interval: 5m
+          repeat_interval: 12h
+          receiver: "null"
+          routes:
+            - receiver: "null"
+              matchers: [ alertname = Watchdog ]
+            - receiver: "slack"
+        receivers:
+          - name: "null"
+          - name: "slack"
+            slack_configs:
+            - channel: '#emrge_k8s_alerts'
+              send_resolved: true
+              icon_url: https://avatars3.githubusercontent.com/u/3380462
+              title: |-
+               [{{ .Status | toUpper }}{{ if eq .Status "firing" }}:{{ .Alerts.Firing | len }}{{ end }}] PC-DEV: {{ .CommonLabels.alertname }} for {{ .CommonLabels.job }}
+               {{- if gt (len .CommonLabels) (len .GroupLabels) -}}
+                 {{" "}}(
+                 {{- with .CommonLabels.Remove .GroupLabels.Names }}
+                   {{- range $index, $label := .SortedPairs -}}
+                     {{ if $index }}, {{ end }}
+                     {{- $label.Name }}="{{ $label.Value -}}"
+                   {{- end }}
+                 {{- end -}}
+                 )
+               {{- end }}
+              text: >-
+               {{ range .Alerts -}}
+               *Alert:* {{ .Annotations.title }}{{ if .Labels.severity }} - `{{ .Labels.severity }}`{{ end }}
+
+               *Description:* {{ .Annotations.description }}
+
+               *Details:*
+                 {{ range .Labels.SortedPairs }} • *{{ .Name }}:* `{{ .Value }}`
+                 {{ end }}
+               {{ end }}
+      ingress:
+        enabled: true
+        annotations:
+          kubernetes.io/ingress.class: private-nginx-ingress
+        hosts:
+          - dev-alertmanager.procare.tech
+        tls:
+          - hosts:
+            - dev-alertmanager.procare.tech
+      alertmanagerSpec:
+#        externalUrl: https://dev-alertmanager.procare.tech/
+        storage:
+          volumeClaimTemplate:
+            spec:
+              # Name of the PV you created beforehand
+#              volumeName: pvc-d46c5f3a-7017-4ecb-ba53-d337debfa42e
+ #             accessModes: ["ReadWriteOnce"]
+              # StorageClass should match your existing PV's storage class
+              storageClassName: managed-premium
+              resources:
+                requests:
+                  # Size below should match your existing PV's size
+                  storage: 5
+    ## Grafana
+    grafana:
+#      image:
+#        repository: grafana/grafana
+#        tag: 7.3.0
+      ingress:
+        enabled: true
+        annotations: 
+          kubernetes.io/ingress.class: private-nginx-ingress
+        hosts:
+          - dev-monitoring.procare.tech
+        tls:
+          - hosts:
+            - dev-monitoring.procare.tech
+      nodeSelector:
+        beta.kubernetes.io/os: linux
+      envRenderSecret:
+        GF_AUTH_GENERIC_OAUTH_ALLOW_SIGN_UP : "true"
+        GF_AUTH_GENERIC_OAUTH_ALLOWED_ORGANIZATIONS : ""
+        GF_AUTH_GENERIC_OAUTH_API_URL : ""
+        GF_AUTH_GENERIC_OAUTH_AUTH_URL : "https://login.microsoftonline.com/a164ca16-3299-4ce3-8cea-2b8c4fcd3257/oauth2/v2.0/authorize"
+        GF_AUTH_GENERIC_OAUTH_CLIENT_ID : "deba73d6-ffa4-4c1a-9346-f3af0528ef52"
+        GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET : "sywNf:}#gVDG#Cel4IGXwWJt*Sg*w9?LBSuq]=T!"
+        GF_AUTH_GENERIC_OAUTH_ENABLED : "true"
+        GF_AUTH_GENERIC_OAUTH_NAME : "Azure AD"
+        GF_AUTH_GENERIC_OAUTH_SCOPES : "openid email profile"
+        GF_AUTH_GENERIC_OAUTH_TEAM_IDS : ""
+        GF_AUTH_GENERIC_OAUTH_TOKEN_URL : "https://login.microsoftonline.com/a164ca16-3299-4ce3-8cea-2b8c4fcd3257/oauth2/v2.0/token"
+        GF_INSTALL_PLUGINS : "grafana-clock-panel,grafana-piechart-panel"
+        GF_SERVER_ROOT_URL : "https://dev-monitoring.procare.tech"
+        GF_SMTP_ENABLED : "false"
+        GF_SMTP_FROM_ADDRESS : ""
+        GF_SMTP_HOST : "smtp.office365.com:587"
+        GF_SMTP_PASSWORD : ""
+        GF_SMTP_SKIP_VERIFY : "false"
+        GF_SMTP_USER : ""
+        GF_DATABASE_URL : "sqlite3:///var/lib/grafana/grafana.db?cache:private&mode:rwc&_journal_mode:WAL"
+      persistence:
+        type: pvc
+        enabled: true
+        finalizers:
+          - kubernetes.io/pvc-protection
+        existingClaim: grafana-pvc
+      admin:
+        existingSecret: dev-grafana-secret
+        userKey: admin-user
+        passwordKey: admin-password
+
+    # AKS does not allow access to these
+    kubeControllerManager:
+      enabled: false
+    kubeEtcd:
+      enabled: false
+    kubeScheduler:
+      enabled: false
+    kubeProxy:
+      enabled: false
+
+    nodeExporter:
+      serviceMonitor:
+        relabelings:
+          - regex: (.+)
+            sourceLabels:
+              - __meta_kubernetes_endpoint_node_name
+            targetLabel: node
+
+    ## Prometheus
+    prometheus:
+      prometheusSpec:
+        retention: 90d
+        additionalAlertRelabelConfigs:
+          - separator: ;
+            regex: prometheus
+            action: labeldrop
+        storageSpec:
+          volumeClaimTemplate:
+            spec:
+              # Name of the PV you created beforehand
+              volumeName: pvc-92b27a32-5611-479c-b091-f9ad17f18d4e
+              accessModes: ["ReadWriteOnce"]
+              # StorageClass should match your existing PV's storage class
+              storageClassName: managed-premium
+              resources:
+                requests:
+                  # Size below should match your existing PV's size
+                  storage: 64
+      ingress:
+        enabled: true
+        annotations: 
+          kubernetes.io/ingress.class: private-nginx-ingress
+        hosts:
+          - dev-collector.procare.tech
+        tls:
+          - hosts:
+            - dev-collector.procare.tech
+
